@@ -26,8 +26,8 @@ jobs:
       - name: Run pytest
         run: python -m pytest -v
 
-  docker:
-    name: Build and smoke-test image
+  sample-app-image:
+    name: Build and smoke-test sample-app
     runs-on: ubuntu-latest
     needs: test
     steps:
@@ -61,3 +61,45 @@ jobs:
       - name: Show logs
         if: always()
         run: docker logs sample-app
+
+  agent-image:
+    name: Build and smoke-test ai-agent
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t ai-agent:${{ github.sha }} agent
+
+      - name: Run container (watcher off, no cluster in CI)
+        run: |
+          docker run -d --name ai-agent -p 8090:8090 \
+            -e WATCH_ENABLED=false \
+            -e AGENT_API_TOKEN=ci-token \
+            ai-agent:${{ github.sha }}
+
+      - name: Wait for healthy status
+        run: |
+          for i in $(seq 1 12); do
+            STATUS=$(docker inspect --format '{{.State.Health.Status}}' ai-agent)
+            echo "Attempt $i: $STATUS"
+            if [ "$STATUS" = "healthy" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "Container did not become healthy"
+          docker logs ai-agent
+          exit 1
+
+      - name: Check endpoints and auth
+        run: |
+          curl -f http://127.0.0.1:8090/health
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8090/incidents)
+          echo "Without token: $CODE"
+          [ "$CODE" = "401" ]
+          curl -f -H "Authorization: Bearer ci-token" http://127.0.0.1:8090/incidents
+
+      - name: Show logs
+        if: always()
+        run: docker logs ai-agent

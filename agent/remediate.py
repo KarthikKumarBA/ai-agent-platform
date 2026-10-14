@@ -28,19 +28,26 @@ AUDIT_FILE = Path(__file__).resolve().parents[1] / "audit" / "audit.jsonl"
 
 SYSTEM_PROMPT = (
     "You are an SRE remediation agent for Kubernetes. Analyze the signals and fill the "
-    "diagnosis schema using only the given evidence.\n"
+    "diagnosis schema using only the given evidence. Apply the rules to focus_pod; "
+    "mention other pods only as context.\n"
     "Choose recommended_action using these rules IN ORDER; the first rule that matches wins:\n"
     "1. 'none' - the app is healthy now (all containers ready).\n"
-    "2. 'investigate' - last_termination_reason is OOMKilled, or logs show memory growing. "
-    "A restart only hides a memory leak; the code or memory limit must be fixed.\n"
-    "3. 'investigate' - waiting_reason is CrashLoopBackOff, Error, ImagePullBackOff or "
-    "ErrImagePull, or logs show a startup/configuration failure. A restart will not fix it.\n"
-    "4. 'none' - the container restarted recently (running_for_seconds < 60) and is "
-    "still starting; Kubernetes is already recovering it. Say so in the reason.\n"
-    "5. 'restart_deployment' - the container is running but not ready and probes are "
+    "2. 'investigate' - focus_pod last_termination_reason is OOMKilled, or its logs show "
+    "memory growing. A restart only hides a memory leak.\n"
+    "3. 'rollback' - focus_pod is failing with CrashLoopBackOff, Error, ImagePullBackOff, "
+    "ErrImagePull, restart_count >= 1, or a startup/configuration error in logs or "
+    "previous_logs, AND deployment_revisions shows the current revision is new "
+    "(age_seconds < 1800) and a previous revision exists. The new release is the likely "
+    "cause; name the image/env difference in the reason.\n"
+    "4. 'investigate' - the same failures as rule 3 but with no recent revision change. "
+    "A restart will not fix it.\n"
+    "5. 'none' - ONLY if focus_pod restart_count is 0, running_for_seconds < 60, and "
+    "logs/previous_logs contain no errors; Kubernetes is still starting it. Never use this "
+    "rule when restart_count >= 1 or any startup/configuration error appears.\n"
+    "6. 'restart_deployment' - the container is running but not ready and probes are "
     "failing, with no sign of the causes above.\n"
-    "6. 'scale_up' - only if evidence shows overload (high latency, CPU saturation).\n"
-    "7. 'investigate' - anything else.\n"
+    "7. 'scale_up' - only if evidence shows overload (high latency, CPU saturation).\n"
+    "8. 'investigate' - anything else.\n"
     "In 'reason', name the rule number you applied."
 )
 
@@ -93,8 +100,10 @@ def approve_node(state: RemediationState) -> RemediationState:
         "confidence": d["confidence"],
         "dry_run": state.get("dry_run", False),
     })
-    approved = str(answer).strip().lower() in ("y", "yes")
-    return {"approval": "approved" if approved else "rejected"}
+    answer = str(answer).strip().lower()
+    if answer == "expired":
+        return {"approval": "expired"}
+    return {"approval": "approved" if answer in ("y", "yes") else "rejected"}
 
 
 def route_after_approve(state: RemediationState) -> str:

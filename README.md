@@ -2,7 +2,7 @@
 
 AI-powered Kubernetes troubleshooting and auto-remediation agent built with **LangGraph**, **LangChain** and **Kubernetes**.
 
-The agent watches an application, collects signals (pod status, events, logs), diagnoses the incident with an LLM, proposes an **allowlisted** fix, waits for **human approval**, executes it, **verifies** recovery and writes an **audit log**.
+The agent watches an application, collects signals (pod status, events, logs, deployment revision history), diagnoses the incident with an LLM, proposes an **allowlisted** fix (restart, scale up or rollback), waits for **human approval**, executes it, **verifies** recovery and writes an **audit log**.
 
 ## Architecture
 
@@ -25,24 +25,24 @@ flowchart LR
 
     W -->|detects unhealthy| AGENT
     AM -->|POST /alerts| AGENT
-    AGENT -->|read pods, events, logs<br/>patch deployment| API
+    AGENT -->|read pods, events, logs, replicasets<br/>patch / update deployment| API
     API --- APP
-    AGENT -->|signals| LLM
+    AGENT -->|redacted signals| LLM
     LLM -->|structured diagnosis| AGENT
-    HUMAN -->|POST /incidents/id/decision| AGENT
+    HUMAN -->|POST /incidents/id/decision<br/>Bearer token| AGENT
 ```
 
 ## Agent workflow (LangGraph)
 
 ```mermaid
 flowchart TD
-    S([START]) --> C[collect signals]
+    S([START]) --> C[collect signals<br/>focus on unhealthy pod]
     C -->|no pods| NP[no_pods]
-    C -->|pods found| A[analyze with LLM<br/>structured output]
-    A -->|action allowed| AP{{approve<br/>human in the loop}}
+    C -->|pods found| A[analyze with LLM<br/>ordered decision rules]
+    A -->|restart / scale_up / rollback| AP{{approve<br/>human in the loop}}
     A -->|none / investigate| R[report + audit]
     AP -->|approved| E[execute]
-    AP -->|rejected| R
+    AP -->|rejected / expired| R
     E -->|executed| V[verify healthy]
     E -->|dry run| R
     V --> R
@@ -54,14 +54,32 @@ flowchart TD
 
 | Control | How |
 |---|---|
-| Allowlisted actions | Only `restart_deployment` and `scale_up` can run; everything else is refused |
+| Allowlisted actions | Only `restart_deployment`, `scale_up` and `rollback` can run; everything else is refused |
 | Human approval | Graph pauses with a LangGraph `interrupt` until an engineer approves or rejects |
-| Least-privilege RBAC | ServiceAccount can read pods/logs/events and patch deployments in `sample-app` only - no delete, no secrets, no other namespaces |
+| Approval expiry | Pending approvals expire after 10 minutes so they never block the watcher |
+| API authentication | All incident endpoints require `Authorization: Bearer <AGENT_API_TOKEN>` |
+| Secret redaction | API keys, tokens, passwords, JWTs and private keys are removed from logs, events and env before reaching the LLM |
+| Least-privilege RBAC | ServiceAccount can read pods/logs/events/replicasets and patch/update deployments in `sample-app` only - no delete, no secrets, no other namespaces |
 | Dry-run mode | `AGENT_DRY_RUN=true` approves without touching the cluster |
 | Verification | After acting, the agent waits until all replicas are ready |
-| Audit log | Every decision is written to `audit/audit.jsonl` |
-| Cooldown | Watcher waits 120s after an incident to avoid remediation loops |
+| Audit log | Every decision (approved, rejected, expired) is written to `audit/audit.jsonl` |
+| Cooldowns | 120s after an action, 30s after a "none" decision, to avoid remediation loops |
 | Secrets | API keys stored in a Kubernetes Secret created from `.env`, never in Git |
+
+## Decision rules
+
+The LLM applies ordered rules to the unhealthy pod; the first match wins and the rule number is recorded in the reason.
+
+| # | Condition | Action |
+|---|---|---|
+| 1 | All containers ready | `none` |
+| 2 | OOMKilled or memory growth | `investigate` |
+| 3 | Crash / startup failure **and** a new revision exists | `rollback` |
+| 4 | Crash / startup failure, no recent revision | `investigate` |
+| 5 | Fresh container, no restarts, no errors | `none` (still starting) |
+| 6 | Running but probes failing | `restart_deployment` |
+| 7 | Evidence of overload | `scale_up` |
+| 8 | Anything else | `investigate` |
 
 ## Tested failure scenarios
 
@@ -69,7 +87,7 @@ flowchart TD
 |---|---|---|
 | App unhealthy (HTTP 503) | `POST /simulate-failure` | `restart_deployment` → approve → verified healthy |
 | Memory leak (OOMKilled) | `POST /simulate-memory-leak` | `investigate` - restart would only hide the leak |
-| Bad config (CrashLoopBackOff) | `CRASH_ON_STARTUP=true` | `investigate` - restart will not fix it |
+| Bad release (CrashLoopBackOff) | `kubectl set env ... CRASH_ON_STARTUP=true` | `rollback` → approve → previous revision restored, verified healthy |
 | Healthy | - | `none` |
 
 ## Repository structure
@@ -82,19 +100,20 @@ ai-agent-platform/
 │   └── requirements.txt
 ├── agent/                 # AI agent
 │   ├── llm/               # Provider factory: openai | anthropic | bedrock
-│   ├── tools.py           # Read-only Kubernetes signal tools
-│   ├── actions.py         # Allowlisted remediation actions
+│   ├── tools.py           # Read-only Kubernetes signal tools (redacted)
+│   ├── redact.py          # Secret redaction
+│   ├── actions.py         # Allowlisted actions: restart, scale_up, rollback
 │   ├── diagnose.py        # Read-only diagnosis graph
 │   ├── remediate.py       # Diagnose -> approve -> execute -> verify graph
-│   ├── server.py          # HTTP API + watcher
+│   ├── server.py          # HTTP API (token auth) + watcher
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── k8s/
 │   ├── sample-app/        # namespace, deployment, service
 │   └── ai-agent/          # namespace, serviceaccount, role, rolebinding, configmap, deployment, service
 ├── iam/                   # Least-privilege Bedrock IAM policy
-├── tests/                 # pytest (no LLM or cluster needed)
-└── .github/workflows/     # CI
+├── tests/                 # pytest with fakes (no LLM or cluster needed)
+└── .github/workflows/     # CI: tests + image builds + smoke tests
 ```
 
 ## LLM providers
@@ -116,16 +135,16 @@ A typical diagnosis uses about 1,000-1,500 tokens.
 python -m venv .venv
 source .venv/Scripts/activate        # Windows Git Bash
 pip install -r requirements.txt
-cp .env.example .env                 # add your API keys
+cp .env.example .env                 # add API keys and AGENT_API_TOKEN
 
 # 2. Tests
 python -m pytest -v
 
 # 3. Build images and load them into the kind node
 docker build -t sample-app:1.1 sample-app
-docker build -t ai-agent:1.3 agent
+docker build -t ai-agent:1.6 agent
 docker save sample-app:1.1 | docker exec -i desktop-control-plane ctr -n k8s.io images import -
-docker save ai-agent:1.3   | docker exec -i desktop-control-plane ctr -n k8s.io images import -
+docker save ai-agent:1.6   | docker exec -i desktop-control-plane ctr -n k8s.io images import -
 
 # 4. Deploy
 kubectl apply -f k8s/sample-app/namespace.yaml
@@ -142,32 +161,43 @@ kubectl port-forward -n ai-agent svc/ai-agent 8090:80
 ## Demo
 
 ```bash
-# Break the app
+export AGENT_API_TOKEN=$(grep '^AGENT_API_TOKEN=' .env | cut -d= -f2-)
+AUTH="Authorization: Bearer $AGENT_API_TOKEN"
+
+# Scenario A: app unhealthy -> restart
 curl -X POST http://127.0.0.1:8081/simulate-failure
 
-# Watcher creates an incident automatically; list it
-curl -s http://127.0.0.1:8090/incidents
+# Scenario B: bad release -> rollback
+kubectl set env deployment/sample-app -n sample-app CRASH_ON_STARTUP=true
+
+# The watcher creates an incident automatically after 30s; list it
+curl -s -H "$AUTH" http://127.0.0.1:8090/incidents
 
 # Approve the proposed action
-curl -s -X POST http://127.0.0.1:8090/incidents/<id>/decision \
-  -H "Content-Type: application/json" -d '{"approve": true}'
+curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"approve": true}' http://127.0.0.1:8090/incidents/<id>/decision
 ```
 
 ## Agent API
 
+All endpoints except `/health` require `Authorization: Bearer <AGENT_API_TOKEN>`.
+
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/health` | Health check |
+| GET | `/health` | Health check (no auth) |
 | POST | `/incidents` | Start a diagnosis manually |
 | GET | `/incidents` | List incidents |
-| GET | `/incidents/{id}` | Incident details |
+| GET | `/incidents/{id}` | Incident details, including approval expiry |
 | POST | `/incidents/{id}/decision` | Approve or reject (`{"approve": true}`) |
 | POST | `/alerts` | Prometheus Alertmanager webhook |
 
 ## Roadmap
 
+- [x] Rollback action using deployment revision history
+- [x] Approval expiry and API token authentication
+- [x] Secret redaction before LLM calls
 - [ ] Persistent incident store (Postgres checkpointer) to allow multiple replicas
+- [ ] Persistent audit log (PVC or log shipping)
 - [ ] Slack approval buttons instead of curl
-- [ ] Rollback action using deployment revision history
 - [ ] Prometheus metrics as an additional signal
 - [ ] Deploy to EKS with Terraform and IRSA / Pod Identity for Bedrock

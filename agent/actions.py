@@ -6,8 +6,9 @@ from datetime import datetime, timezone
 
 from kubernetes import client, config
 
-ALLOWED_ACTIONS = {"restart_deployment", "scale_up"}
+ALLOWED_ACTIONS = {"restart_deployment", "scale_up", "rollback"}
 MAX_REPLICAS = 3
+REVISION_ANNOTATION = "deployment.kubernetes.io/revision"
 
 
 def _apps_api() -> client.AppsV1Api:
@@ -16,6 +17,10 @@ def _apps_api() -> client.AppsV1Api:
     except config.ConfigException:
         config.load_kube_config()
     return client.AppsV1Api()
+
+
+def _revision(obj) -> int:
+    return int((obj.metadata.annotations or {}).get(REVISION_ANNOTATION, 0))
 
 
 def restart_deployment(namespace: str, name: str, dry_run: bool = True) -> dict:
@@ -57,6 +62,45 @@ def scale_up(namespace: str, name: str, dry_run: bool = True) -> dict:
             "from": current, "to": target}
 
 
+def rollback_deployment(namespace: str, name: str, dry_run: bool = True) -> dict:
+    """Roll back to the previous revision (same as: kubectl rollout undo deployment/<name>)."""
+    api = _apps_api()
+    d = api.read_namespaced_deployment(name, namespace)
+    current = _revision(d)
+
+    selector = ",".join(f"{k}={v}" for k, v in (d.spec.selector.match_labels or {}).items())
+    owned = [
+        rs for rs in api.list_namespaced_replica_set(namespace, label_selector=selector).items
+        if any(o.uid == d.metadata.uid for o in (rs.metadata.owner_references or []))
+    ]
+    older = sorted((rs for rs in owned if _revision(rs) < current), key=_revision)
+
+    if not older:
+        return {"action": "rollback", "executed": False,
+                "reason": "No previous revision to roll back to"}
+
+    target = older[-1]
+    result = {
+        "action": "rollback",
+        "from_revision": current,
+        "to_revision": _revision(target),
+        "image": target.spec.template.spec.containers[0].image,
+    }
+
+    if dry_run:
+        return {**result, "executed": False, "dry_run": True}
+
+    # Use the previous ReplicaSet's pod template (without its generated hash label)
+    template = target.spec.template
+    labels = dict(template.metadata.labels or {})
+    labels.pop("pod-template-hash", None)
+    template.metadata.labels = labels
+
+    d.spec.template = template
+    api.replace_namespaced_deployment(name, namespace, d)
+    return {**result, "executed": True, "dry_run": False}
+
+
 def wait_for_healthy(namespace: str, name: str, timeout: int = 120) -> dict:
     """Poll until all replicas are updated and ready, or timeout."""
     api = _apps_api()
@@ -86,20 +130,18 @@ def execute_action(action: str, namespace: str, name: str, dry_run: bool = True)
         return {"action": action, "executed": False,
                 "reason": f"'{action}' is not in the allowlist {sorted(ALLOWED_ACTIONS)}"}
 
-    handlers = {"restart_deployment": restart_deployment, "scale_up": scale_up}
+    handlers = {
+        "restart_deployment": restart_deployment,
+        "scale_up": scale_up,
+        "rollback": rollback_deployment,
+    }
     return handlers[action](namespace, name, dry_run=dry_run)
 
 
 if __name__ == "__main__":
-    # python agent/actions.py           -> dry run
-    # python agent/actions.py --apply   -> real restart + verify
-    apply = "--apply" in sys.argv
+    # python agent/actions.py   -> dry runs only, nothing changes
     ns, deploy = "sample-app", "sample-app"
 
-    print(execute_action("rollback", ns, deploy))  # blocked by allowlist
-    result = execute_action("restart_deployment", ns, deploy, dry_run=not apply)
-    print(result)
-
-    if result.get("executed"):
-        print("Verifying...")
-        print(wait_for_healthy(ns, deploy))
+    print(execute_action("delete_namespace", ns, deploy))  # blocked by allowlist
+    print(execute_action("restart_deployment", ns, deploy, dry_run=True))
+    print(execute_action("rollback", ns, deploy, dry_run=True))

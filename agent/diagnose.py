@@ -16,7 +16,12 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llm import get_llm  # noqa: E402
-from tools import get_events, get_pod_logs, get_pod_status  # noqa: E402
+from tools import (  # noqa: E402
+    get_deployment_revisions,
+    get_events,
+    get_pod_logs,
+    get_pod_status,
+)
 
 
 # ---------- Structured output schema ----------
@@ -36,6 +41,7 @@ class Diagnosis(BaseModel):
 class AgentState(TypedDict, total=False):
     namespace: str
     selector: str
+    deployment: str
     provider: str | None
     model: str | None
     signals: dict
@@ -62,6 +68,7 @@ def _pick_focus_pod(pods: list[dict]) -> dict:
 # ---------- Nodes ----------
 def collect_node(state: AgentState) -> AgentState:
     ns, selector = state["namespace"], state["selector"]
+    deployment = state.get("deployment", "sample-app")
     pods = get_pod_status(ns, selector)
 
     if not pods:
@@ -73,6 +80,7 @@ def collect_node(state: AgentState) -> AgentState:
         "signals": {
             "pods": pods,
             "focus_pod": pod_name,
+            "deployment_revisions": get_deployment_revisions(ns, deployment),
             "events": get_events(ns, pod_name, limit=10),
             "logs": get_pod_logs(ns, pod_name, tail_lines=10),
             "previous_logs": get_pod_logs(ns, pod_name, tail_lines=10, previous=True),
@@ -160,6 +168,7 @@ def main() -> None:
     app.invoke({
         "namespace": "sample-app",
         "selector": "app=sample-app",
+        "deployment": "sample-app",
         "provider": provider,
         "model": model,
     })

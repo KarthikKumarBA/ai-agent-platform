@@ -4,8 +4,10 @@ import json
 import sys
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 from langgraph.types import Command
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
@@ -14,6 +16,7 @@ import actions  # noqa: E402
 import diagnose  # noqa: E402
 import remediate  # noqa: E402
 import server  # noqa: E402
+from redact import redact_env, redact_text  # noqa: E402
 
 
 # ---------- Helpers ----------
@@ -61,6 +64,120 @@ def test_restart_dry_run_does_not_call_kubernetes(monkeypatch):
     assert result == {"action": "restart_deployment", "executed": False, "dry_run": True}
 
 
+# ---------- Rollback with a fake Kubernetes API ----------
+REV = actions.REVISION_ANNOTATION
+
+
+def fake_replica_set(revision: int, image: str, owner_uid: str = "deploy-uid"):
+    return SimpleNamespace(
+        metadata=SimpleNamespace(
+            annotations={REV: str(revision)},
+            owner_references=[SimpleNamespace(uid=owner_uid)],
+        ),
+        spec=SimpleNamespace(template=SimpleNamespace(
+            metadata=SimpleNamespace(labels={"app": "sample-app",
+                                             "pod-template-hash": f"hash{revision}"}),
+            spec=SimpleNamespace(containers=[SimpleNamespace(image=image)]),
+        )),
+    )
+
+
+class FakeAppsApi:
+    def __init__(self, current_revision: int, replica_sets: list):
+        self.deployment = SimpleNamespace(
+            metadata=SimpleNamespace(annotations={REV: str(current_revision)}, uid="deploy-uid"),
+            spec=SimpleNamespace(
+                selector=SimpleNamespace(match_labels={"app": "sample-app"}),
+                template=None,
+            ),
+        )
+        self.replica_sets = replica_sets
+        self.replaced = None
+
+    def read_namespaced_deployment(self, name, namespace):
+        return self.deployment
+
+    def list_namespaced_replica_set(self, namespace, label_selector=None):
+        return SimpleNamespace(items=self.replica_sets)
+
+    def replace_namespaced_deployment(self, name, namespace, body):
+        self.replaced = body
+
+
+def test_rollback_dry_run_picks_previous_revision(monkeypatch):
+    api = FakeAppsApi(3, [fake_replica_set(1, "app:v1"), fake_replica_set(2, "app:v2"),
+                          fake_replica_set(3, "app:v3")])
+    monkeypatch.setattr(actions, "_apps_api", lambda: api)
+
+    result = actions.rollback_deployment("sample-app", "sample-app", dry_run=True)
+
+    assert result["from_revision"] == 3
+    assert result["to_revision"] == 2
+    assert result["image"] == "app:v2"
+    assert result["executed"] is False
+    assert api.replaced is None
+
+
+def test_rollback_apply_restores_previous_template(monkeypatch):
+    api = FakeAppsApi(3, [fake_replica_set(2, "app:v2"), fake_replica_set(3, "app:v3")])
+    monkeypatch.setattr(actions, "_apps_api", lambda: api)
+
+    result = actions.rollback_deployment("sample-app", "sample-app", dry_run=False)
+
+    assert result["executed"] is True
+    template = api.replaced.spec.template
+    assert template.spec.containers[0].image == "app:v2"
+    assert "pod-template-hash" not in template.metadata.labels
+
+
+def test_rollback_without_previous_revision(monkeypatch):
+    api = FakeAppsApi(1, [fake_replica_set(1, "app:v1")])
+    monkeypatch.setattr(actions, "_apps_api", lambda: api)
+
+    result = actions.rollback_deployment("sample-app", "sample-app", dry_run=False)
+
+    assert result["executed"] is False
+    assert "No previous revision" in result["reason"]
+    assert api.replaced is None
+
+
+def test_rollback_ignores_replica_sets_of_other_deployments(monkeypatch):
+    api = FakeAppsApi(2, [fake_replica_set(1, "other:v1", owner_uid="other-uid"),
+                          fake_replica_set(2, "app:v2")])
+    monkeypatch.setattr(actions, "_apps_api", lambda: api)
+
+    result = actions.rollback_deployment("sample-app", "sample-app", dry_run=True)
+
+    assert result["executed"] is False
+    assert "No previous revision" in result["reason"]
+
+
+# ---------- redact.py ----------
+def test_redact_text_removes_secrets():
+    text = (
+        "connecting with password=hunter2 token: abc123 "
+        "key sk-abcdefghijklmnopqrstuvwx and AKIAABCDEFGHIJKLMNOP "
+        "Authorization: Bearer eyJhbGciOi.eyJzdWIiOi.c2lnbmF0dXJl"
+    )
+    result = redact_text(text)
+
+    assert "hunter2" not in result
+    assert "abc123" not in result
+    assert "sk-abcdefghijklmnopqrstuvwx" not in result
+    assert "AKIAABCDEFGHIJKLMNOP" not in result
+    assert "eyJhbGciOi" not in result
+    assert redact_text("INFO: Health check passed") == "INFO: Health check passed"
+
+
+def test_redact_env_hides_secret_names():
+    env = {"ENVIRONMENT": "kubernetes", "DB_PASSWORD": "hunter2", "API_KEY": "xyz"}
+    result = redact_env(env)
+
+    assert result["ENVIRONMENT"] == "kubernetes"
+    assert result["DB_PASSWORD"] == "[REDACTED]"
+    assert result["API_KEY"] == "[REDACTED]"
+
+
 # ---------- diagnose.py ----------
 def test_focus_pod_prefers_unhealthy_pod():
     pods = [make_pod("healthy-pod", True), make_pod("broken-pod", False)]
@@ -72,11 +189,28 @@ def test_focus_pod_falls_back_to_first_pod():
     assert diagnose._pick_focus_pod(pods)["pod"] == "pod-a"
 
 
-# ---------- server.py watcher ----------
+# ---------- server.py ----------
 def test_watcher_detects_unhealthy():
     assert server._is_unhealthy([]) is True
     assert server._is_unhealthy([make_pod("p", False)]) is True
     assert server._is_unhealthy([make_pod("p", True)]) is False
+
+
+def test_api_requires_token_when_configured(monkeypatch):
+    monkeypatch.setattr(server, "API_TOKEN", "secret-token")
+    client = TestClient(server.app)  # not used as context manager -> watcher not started
+
+    assert client.get("/health").status_code == 200
+    assert client.get("/incidents").status_code == 401
+    assert client.get("/incidents", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/incidents",
+                      headers={"Authorization": "Bearer secret-token"}).status_code == 200
+
+
+def test_api_open_when_no_token(monkeypatch):
+    monkeypatch.setattr(server, "API_TOKEN", "")
+    client = TestClient(server.app)
+    assert client.get("/incidents").status_code == 200
 
 
 # ---------- remediate.py graph ----------
@@ -140,6 +274,16 @@ def test_graph_rejected_restart_does_nothing(fake_agent):
     assert state["approval"] == "rejected"
     assert "action_result" not in state
     assert executed == []
+
+
+def test_graph_expired_approval_does_nothing(fake_agent):
+    run, executed, audit_file = fake_agent
+    interrupted, state = run("rollback", answer="expired")
+
+    assert interrupted is True
+    assert state["approval"] == "expired"
+    assert executed == []
+    assert json.loads(audit_file.read_text().strip())["approval"] == "expired"
 
 
 def test_graph_dry_run_does_not_change_cluster(fake_agent):

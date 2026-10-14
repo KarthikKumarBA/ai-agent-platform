@@ -1,4 +1,4 @@
-"""Read-only Kubernetes signal tools used by the agent."""
+"""Read-only Kubernetes signal tools used by the agent. All text is redacted."""
 
 import json
 from datetime import datetime, timezone
@@ -6,13 +6,26 @@ from datetime import datetime, timezone
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
+from redact import redact_env, redact_text
 
-def _core_api() -> client.CoreV1Api:
+REVISION_ANNOTATION = "deployment.kubernetes.io/revision"
+
+
+def _load_config() -> None:
     try:
         config.load_incluster_config()
     except config.ConfigException:
         config.load_kube_config()
+
+
+def _core_api() -> client.CoreV1Api:
+    _load_config()
     return client.CoreV1Api()
+
+
+def _apps_api() -> client.AppsV1Api:
+    _load_config()
+    return client.AppsV1Api()
 
 
 def get_pod_status(namespace: str, label_selector: str) -> list[dict]:
@@ -66,15 +79,16 @@ def get_pod_status(namespace: str, label_selector: str) -> list[dict]:
 
 def get_pod_logs(namespace: str, pod_name: str, tail_lines: int = 50,
                  previous: bool = False) -> str:
-    """Return recent logs. previous=True gives logs of the crashed container."""
+    """Return recent (redacted) logs. previous=True gives logs of the crashed container."""
     v1 = _core_api()
     try:
-        return v1.read_namespaced_pod_log(
+        logs = v1.read_namespaced_pod_log(
             name=pod_name,
             namespace=namespace,
             tail_lines=tail_lines,
             previous=previous,
         )
+        return redact_text(logs)
     except ApiException as e:
         return f"Could not read logs: {e.reason}"
 
@@ -95,7 +109,7 @@ def get_events(namespace: str, pod_name: str | None = None,
         {
             "type": e.type,
             "reason": e.reason,
-            "message": e.message,
+            "message": redact_text(e.message),
             "count": e.count,
             "last_seen": str(e.last_timestamp or e.event_time),
         }
@@ -103,12 +117,53 @@ def get_events(namespace: str, pod_name: str | None = None,
     ]
 
 
+def get_deployment_revisions(namespace: str, name: str, limit: int = 3) -> dict:
+    """Return the deployment's recent revisions (image, env, age) - shows what changed."""
+    apps = _apps_api()
+    try:
+        d = apps.read_namespaced_deployment(name, namespace)
+    except ApiException as e:
+        return {"error": f"Could not read deployment: {e.reason}"}
+
+    current = int((d.metadata.annotations or {}).get(REVISION_ANNOTATION, 0))
+    selector = ",".join(f"{k}={v}" for k, v in (d.spec.selector.match_labels or {}).items())
+    replica_sets = apps.list_namespaced_replica_set(namespace, label_selector=selector).items
+    now = datetime.now(timezone.utc)
+
+    revisions = []
+    for rs in replica_sets:
+        owners = rs.metadata.owner_references or []
+        if not any(o.uid == d.metadata.uid for o in owners):
+            continue
+
+        containers = rs.spec.template.spec.containers
+        revision = int((rs.metadata.annotations or {}).get(REVISION_ANNOTATION, 0))
+        env = {
+            e.name: (e.value if e.value is not None else "<from reference>")
+            for c in containers for e in (c.env or [])
+        }
+        revisions.append({
+            "revision": revision,
+            "current": revision == current,
+            "age_seconds": int((now - rs.metadata.creation_timestamp).total_seconds()),
+            "images": [c.image for c in containers],
+            "env": redact_env(env),
+            "ready_replicas": rs.status.ready_replicas or 0,
+        })
+
+    revisions.sort(key=lambda r: r["revision"], reverse=True)
+    return {"current_revision": current, "revisions": revisions[:limit]}
+
+
 if __name__ == "__main__":
-    ns, selector = "sample-app", "app=sample-app"
+    ns, selector, deploy = "sample-app", "app=sample-app", "sample-app"
 
     pods = get_pod_status(ns, selector)
     print("=== POD STATUS ===")
     print(json.dumps(pods, indent=2))
+
+    print("\n=== DEPLOYMENT REVISIONS ===")
+    print(json.dumps(get_deployment_revisions(ns, deploy), indent=2))
 
     if pods:
         pod_name = pods[0]["pod"]
