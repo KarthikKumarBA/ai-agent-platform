@@ -6,4 +6,7 @@ httpx
 langchain
 langgraph
 langchain-aws
+langchain-openai
+langchain-anthropic
 python-dotenv
+kubernetes

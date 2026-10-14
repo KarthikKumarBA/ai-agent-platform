@@ -17,6 +17,9 @@ htmlcov/
 .env.*
 !.env.example
 
+# Agent audit logs (local)
+audit/
+
 # AWS / Kubernetes credentials
 *.pem
 kubeconfig*

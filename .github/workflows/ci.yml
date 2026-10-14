@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        run: python -m pytest -v
+
+  docker:
+    name: Build and smoke-test image
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t sample-app:${{ github.sha }} sample-app
+
+      - name: Run container
+        run: docker run -d --name sample-app -p 8080:8000 sample-app:${{ github.sha }}
+
+      - name: Wait for healthy status
+        run: |
+          for i in $(seq 1 12); do
+            STATUS=$(docker inspect --format '{{.State.Health.Status}}' sample-app)
+            echo "Attempt $i: $STATUS"
+            if [ "$STATUS" = "healthy" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "Container did not become healthy"
+          docker logs sample-app
+          exit 1
+
+      - name: Check endpoints
+        run: |
+          curl -f http://127.0.0.1:8080/
+          curl -f http://127.0.0.1:8080/health
+          curl -f http://127.0.0.1:8080/status
+
+      - name: Show logs
+        if: always()
+        run: docker logs sample-app
