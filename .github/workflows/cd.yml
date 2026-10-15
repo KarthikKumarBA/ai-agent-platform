@@ -29,10 +29,10 @@ jobs:
   test:
     name: Run tests
     if: github.event.inputs.action == 'deploy'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           cache: pip
@@ -43,9 +43,9 @@ jobs:
     name: Build, push and deploy
     needs: test
     if: github.event.inputs.action == 'deploy'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -105,7 +105,7 @@ jobs:
   uninstall:
     name: Uninstall
     if: github.event.inputs.action == 'uninstall'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
