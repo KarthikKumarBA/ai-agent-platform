@@ -1,8 +1,0 @@
-{{- if and .Values.createNamespaces (ne .Values.sampleApp.namespace .Release.Namespace) }}
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: {{ .Values.sampleApp.namespace }}
-  labels:
-    {{- include "aap.labels" . | nindent 4 }}
-{{- end }}

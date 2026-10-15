@@ -1,6 +1,4 @@
-# AWS EKS: namespaces come from Terraform; image repository/tag are set by the CD workflow
-createNamespaces: false
-
+# AWS EKS: the namespace comes from Terraform; image repository/tag are set by the CD workflow
 sampleApp:
   image:
     repository: REPLACED_BY_CD

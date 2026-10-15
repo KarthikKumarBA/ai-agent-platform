@@ -6,7 +6,7 @@ metadata:
   labels:
     {{- include "aap.labels" . | nindent 4 }}
 data:
-  TARGET_NAMESPACE: {{ .Values.sampleApp.namespace | quote }}
+  TARGET_NAMESPACE: {{ .Release.Namespace | quote }}
   TARGET_DEPLOYMENT: sample-app
   TARGET_SELECTOR: app=sample-app
   {{- range $key, $value := .Values.agent.config }}

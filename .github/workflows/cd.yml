@@ -22,7 +22,7 @@ env:
   CLUSTER: ${{ vars.EKS_CLUSTER_NAME }}
   REGISTRY: ${{ vars.ECR_REGISTRY }}
   IMAGE_TAG: ${{ github.sha }}
-  NAMESPACE: ai-agent
+  NAMESPACE: ai-agent-platform
   RELEASE: ai-agent-platform
 
 jobs:
@@ -93,13 +93,13 @@ jobs:
 
       - name: Smoke test
         run: |
-          kubectl get pods -n sample-app
           kubectl get pods -n "$NAMESPACE"
           kubectl exec -n "$NAMESPACE" deploy/ai-agent -- python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8090/health').read().decode())"
           {
-            echo "### ai-agent-platform deployed"
+            echo "### ai-agent-platform deployed (namespace \`$NAMESPACE\`)"
             echo "- Image tag: \`$IMAGE_TAG\`"
             echo "- Agent API: \`kubectl port-forward -n $NAMESPACE svc/ai-agent 8090:80\`"
+            echo "- Sample app: \`kubectl port-forward -n $NAMESPACE svc/sample-app 8081:80\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   uninstall:

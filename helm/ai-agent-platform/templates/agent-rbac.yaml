@@ -6,12 +6,13 @@ metadata:
   labels:
     {{- include "aap.labels" . | nindent 4 }}
 ---
-# Least privilege: read signals, restart/scale/rollback deployments - only in the sample-app namespace
+# Least privilege: read signals in this namespace; change ONLY the sample-app deployment
+# (resourceNames), so the agent can never restart, scale or roll back itself.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: ai-agent-remediator
-  namespace: {{ .Values.sampleApp.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "aap.labels" . | nindent 4 }}
 rules:
@@ -20,9 +21,11 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "list", "patch", "update"]
+    resourceNames: ["sample-app"]
+    verbs: ["get", "patch", "update"]
   - apiGroups: ["apps"]
     resources: ["deployments/scale"]
+    resourceNames: ["sample-app"]
     verbs: ["get", "patch"]
   - apiGroups: ["apps"]
     resources: ["replicasets"]
@@ -32,7 +35,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: ai-agent-remediator
-  namespace: {{ .Values.sampleApp.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "aap.labels" . | nindent 4 }}
 subjects:

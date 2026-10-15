@@ -1,15 +1,10 @@
-# The agent runs in the release namespace (helm -n ai-agent).
-# The sample app runs in sampleApp.namespace; the agent gets RBAC there.
-
-# Create the sample-app namespace from the chart (local kind). On EKS Terraform creates it.
-createNamespaces: false
+# Everything (agent + sample app) runs in the release namespace: helm -n ai-agent-platform
 
 # Secret in the release namespace with: AGENT_API_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY (optional)
 secrets:
   existingSecret: ai-agent-secrets
 
 sampleApp:
-  namespace: sample-app
   image:
     repository: sample-app
     tag: "1.1"

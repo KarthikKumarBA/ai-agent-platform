@@ -1,6 +1,7 @@
 # Deploy ai-agent-platform to AWS EKS
 
-The cluster, ECR repositories and the deploy role come from the **aws-infra** repository.
+The cluster, ECR repositories, the `ai-agent-platform` namespace and the deploy role come from the **aws-infra** repository.
+The agent and the sample app both run in the `ai-agent-platform` namespace; the agent may change only the `sample-app` deployment.
 
 ## GitHub settings (once)
 
@@ -16,18 +17,18 @@ GitHub → **Actions** → **CD** → **Run workflow** → `deploy` or `uninstal
 
 ```bash
 aws eks update-kubeconfig --name karthik-eks --region ap-south-1
-kubectl port-forward -n sample-app svc/sample-app 8081:80
-kubectl port-forward -n ai-agent svc/ai-agent 8090:80
+kubectl port-forward -n ai-agent-platform svc/sample-app 8081:80
+kubectl port-forward -n ai-agent-platform svc/ai-agent 8090:80
 curl -X POST http://127.0.0.1:8081/simulate-failure
 curl -s -H "Authorization: Bearer <AGENT_API_TOKEN>" http://127.0.0.1:8090/incidents
 ```
 
 ## Local (kind) with the same chart
 
-Remove the old raw-manifest install first: `kubectl delete namespace ai-agent sample-app`.
+Remove the old raw-manifest install first: `kubectl delete namespace ai-agent sample-app --ignore-not-found`.
 
 ```bash
-kubectl create namespace ai-agent
-kubectl create secret generic ai-agent-secrets -n ai-agent --from-env-file=.env
-helm upgrade --install ai-agent-platform helm/ai-agent-platform -n ai-agent -f helm/ai-agent-platform/values-local.yaml
+kubectl create namespace ai-agent-platform
+kubectl create secret generic ai-agent-secrets -n ai-agent-platform --from-env-file=.env
+helm upgrade --install ai-agent-platform helm/ai-agent-platform -n ai-agent-platform -f helm/ai-agent-platform/values-local.yaml
 ```
