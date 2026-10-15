@@ -1,0 +1,65 @@
+# The agent runs in the release namespace (helm -n ai-agent).
+# The sample app runs in sampleApp.namespace; the agent gets RBAC there.
+
+# Create the sample-app namespace from the chart (local kind). On EKS Terraform creates it.
+createNamespaces: false
+
+# Secret in the release namespace with: AGENT_API_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY (optional)
+secrets:
+  existingSecret: ai-agent-secrets
+
+sampleApp:
+  namespace: sample-app
+  image:
+    repository: sample-app
+    tag: "1.1"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+agent:
+  image:
+    repository: ai-agent
+    tag: "1.6"
+    pullPolicy: IfNotPresent
+  service:
+    port: 80
+  config:
+    LLM_PROVIDER: openai
+    LLM_MAX_TOKENS: "300"
+    OPENAI_MODEL_ID: gpt-4o-mini
+    ANTHROPIC_MODEL_ID: claude-haiku-4-5
+    AWS_REGION: us-east-1
+    AGENT_DRY_RUN: "false"
+    WATCH_ENABLED: "true"
+    WATCH_INTERVAL_SECONDS: "10"
+    UNHEALTHY_THRESHOLD_SECONDS: "30"
+    INCIDENT_COOLDOWN_SECONDS: "120"
+    NONE_COOLDOWN_SECONDS: "30"
+    APPROVAL_TIMEOUT_SECONDS: "600"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]

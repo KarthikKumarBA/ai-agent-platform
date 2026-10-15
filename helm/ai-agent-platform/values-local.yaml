@@ -1,0 +1,10 @@
+# Docker Desktop kind: images loaded into the node, sample-app namespace created by the chart
+createNamespaces: true
+
+sampleApp:
+  image:
+    pullPolicy: Never
+
+agent:
+  image:
+    pullPolicy: Never

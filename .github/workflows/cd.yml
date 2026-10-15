@@ -1,0 +1,120 @@
+name: CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "deploy or uninstall"
+        type: choice
+        options: [deploy, uninstall]
+        default: deploy
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: cd-ai-agent-platform
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  CLUSTER: ${{ vars.EKS_CLUSTER_NAME }}
+  REGISTRY: ${{ vars.ECR_REGISTRY }}
+  IMAGE_TAG: ${{ github.sha }}
+  NAMESPACE: ai-agent
+  RELEASE: ai-agent-platform
+
+jobs:
+  test:
+    name: Run tests
+    if: github.event.inputs.action == 'deploy'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -v
+
+  deploy:
+    name: Build, push and deploy
+    needs: test
+    if: github.event.inputs.action == 'deploy'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push images
+        run: |
+          docker build -t "$REGISTRY/sample-app:$IMAGE_TAG" sample-app
+          docker build -t "$REGISTRY/ai-agent:$IMAGE_TAG" agent
+          docker push "$REGISTRY/sample-app:$IMAGE_TAG"
+          docker push "$REGISTRY/ai-agent:$IMAGE_TAG"
+
+      - uses: azure/setup-helm@v4
+
+      - name: Connect to EKS
+        run: aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+
+      - name: Create or update the secret
+        env:
+          AGENT_API_TOKEN: ${{ secrets.AGENT_API_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          kubectl create secret generic ai-agent-secrets -n "$NAMESPACE" \
+            --from-literal=AGENT_API_TOKEN="$AGENT_API_TOKEN" \
+            --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY" \
+            --from-literal=ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Helm deploy
+        run: |
+          helm lint helm/ai-agent-platform -f helm/ai-agent-platform/values-eks.yaml
+          helm upgrade --install "$RELEASE" helm/ai-agent-platform -n "$NAMESPACE" \
+            -f helm/ai-agent-platform/values-eks.yaml \
+            --set sampleApp.image.repository="$REGISTRY/sample-app" \
+            --set sampleApp.image.tag="$IMAGE_TAG" \
+            --set agent.image.repository="$REGISTRY/ai-agent" \
+            --set agent.image.tag="$IMAGE_TAG" \
+            --wait --timeout 10m
+
+      - name: Smoke test
+        run: |
+          kubectl get pods -n sample-app
+          kubectl get pods -n "$NAMESPACE"
+          kubectl exec -n "$NAMESPACE" deploy/ai-agent -- python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8090/health').read().decode())"
+          {
+            echo "### ai-agent-platform deployed"
+            echo "- Image tag: \`$IMAGE_TAG\`"
+            echo "- Agent API: \`kubectl port-forward -n $NAMESPACE svc/ai-agent 8090:80\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  uninstall:
+    name: Uninstall
+    if: github.event.inputs.action == 'uninstall'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: azure/setup-helm@v4
+      - name: Uninstall release
+        run: |
+          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+          helm uninstall "$RELEASE" -n "$NAMESPACE" --wait || echo "Release not installed"
+          kubectl delete secret ai-agent-secrets -n "$NAMESPACE" --ignore-not-found
