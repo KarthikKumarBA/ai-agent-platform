@@ -32,3 +32,5 @@ kubectl create namespace ai-agent-platform
 kubectl create secret generic ai-agent-secrets -n ai-agent-platform --from-env-file=.env
 helm upgrade --install ai-agent-platform helm/ai-agent-platform -n ai-agent-platform -f helm/ai-agent-platform/values-local.yaml
 ```
+
+> Full step-by-step EKS runbook (bring up, deploy, test, tear down): **aws-infra/README.md**
