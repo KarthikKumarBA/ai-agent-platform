@@ -38,16 +38,16 @@ spec:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            failureThreshold: 2
+            initialDelaySeconds: {{ .Values.sampleApp.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.sampleApp.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.sampleApp.probes.readiness.failureThreshold }}
           livenessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            failureThreshold: 3
+            initialDelaySeconds: {{ .Values.sampleApp.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.sampleApp.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.sampleApp.probes.liveness.failureThreshold }}
 ---
 apiVersion: v1
 kind: Service

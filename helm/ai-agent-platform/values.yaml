@@ -17,6 +17,19 @@ sampleApp:
     limits:
       cpu: 250m
       memory: 256Mi
+  # Probe timing is chosen so the AI agent acts first:
+  #   watcher opens an incident after UNHEALTHY_THRESHOLD_SECONDS (30 s) + one scan (10 s) = ~40 s
+  #   liveness restarts the pod after periodSeconds x failureThreshold = 10 x 9 = ~90 s
+  # With the Kubernetes default (3 failures = ~30 s) the kubelet restart hides the failure from the agent.
+  probes:
+    readiness:
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      failureThreshold: 2
+    liveness:
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      failureThreshold: 9
 
 agent:
   image:
